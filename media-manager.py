@@ -7,9 +7,10 @@ from prefect.logging import get_run_logger
 
 from pymupdf4llm import to_markdown
 
-from os import makedirs, getcwd
-from urllib.parse import urlparse
 from os.path import basename, join
+from os import makedirs, getcwd, setxattr
+
+from urllib.parse import urlparse
 
 @task(name="download-document", retries=3, timeout_seconds=20)
 def download_document(url: str) -> str:
@@ -36,6 +37,7 @@ def download_document(url: str) -> str:
                     doc.write(chunk)
 
         logger.info(f"downloaded at: {path}")
+        setxattr(path, "url", url)
 
         return path
 
