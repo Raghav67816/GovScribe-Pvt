@@ -6,6 +6,7 @@ from os import getenv, getxattr
 from prefect import task, flow
 from prefect.logging import get_run_logger
 
+from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_nomic.embeddings import NomicEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
@@ -16,42 +17,44 @@ from qdrant_client.models import VectorParams, PointStruct, Distance
 load_dotenv(".env")
 
 connection_url = getenv("QDRANT_URL")
-collection_name = getenv("documents")
 
-qclient = QdrantClient(url=connection_url)
+print(connection_url)
 
-embeddings = NomicEmbeddings(
-    model="nomic-embed-text-v1.5",
-    dimensionality=512
-)
+collection_name = getenv("QDRANT_COLLECTION_NAME")
 
-vector_store = QdrantVectorStore(
-    client=qclient,
-    embedding=embeddings,
-    collection_name=collection_name
-)
+def create_qdrant_session():
+    qclient = QdrantClient(url=connection_url)
 
-
-if not qclient.collection_exists(collection_name):
-    qclient.create_collection(
-        collection_name,
-        vectors_config=VectorParams(
-            size=768,
-            distance=Distance.COSINE,
-            on_disk=True
-        )
+    embeddings = NomicEmbeddings(
+        model="nomic-embed-text-v1.5",
+        dimensionality=768,
+        inference_mode="local"
     )
 
+    if not qclient.collection_exists(collection_name):
+        qclient.create_collection(
+            collection_name,
+            vectors_config=VectorParams(
+                size=768,
+                distance=Distance.COSINE,
+                on_disk=True
+            )
+        )
+
+    vector_store = QdrantVectorStore(
+        client=qclient,
+        embedding=embeddings,
+        collection_name=collection_name,
+    )
+
+    return (qclient, vector_store, embeddings)
+
+
 @task(name="text-chunking")
-def text_chunking(content: str, purpose: str) -> list:
+def text_chunking(content: str) -> list:
 
     logger = get_run_logger()
-
-    valid_purpose = ["search_document", "search_query"]
-
-    if purpose not in valid_purpose:
-        logger.warning(f"purpose: {purpose} is not valid")
-        return []
+    qclient, vector_store, embeddings = create_qdrant_session()
 
     splitter = SemanticChunker(
         embeddings,
@@ -62,26 +65,32 @@ def text_chunking(content: str, purpose: str) -> list:
     chunks = splitter.create_documents([content])
     logger.info(f"created {len(chunks)} documents")
 
-    return [chunk.page_content for chunk in chunks]
+    return chunks
 
 
 
 @task(name="ammendment-check")
 def check_ammendment(chunks: list) -> bool:
     logger = get_run_logger()
+    qclient, vector_store, embeddings = create_qdrant_session()
 
     match_count = 0
     matching_payload = []
+
+    chunks = [chunk.page_content for chunk in chunks]
 
     if len(chunks) == 0 or not qclient.collection_exists(collection_name):
         logger.error("collection does not exists... skipping checks")
         return False
 
+    # TODO: check similary search
     num = random.randint(4, 11)
     for i in range(0, num):
-        random_chunk_idx = random.randint(0, len(chunks))
+        random_chunk_idx = random.randint(0, len(chunks) - 1)
+        logger.info(f"random chunk index: {random_chunk_idx}")
 
         query_text = f"search_query: {chunks[random_chunk_idx]}"
+
         query_vector = embeddings.embed_query(query_text)
 
         results = qclient.query_points(
@@ -92,9 +101,11 @@ def check_ammendment(chunks: list) -> bool:
             with_payload=True
         )
 
-        if results:
+        if len(results.points) > 0:
             match_count += 1
-            matching_payload.append(results[0].payload)
+            for point in results.points:
+                logger.info(point.id)
+                logger.info(point.score)
 
     ratio = match_count / num
 
@@ -105,19 +116,40 @@ def check_ammendment(chunks: list) -> bool:
     else:
         return False
 
+@task(name="embed-chunks")
+def embed_chunks(chunks: list[Document]):
 
-@task(name="embedd-document")
-def embed_document(chunks: list, path: str):
     logger = get_run_logger()
-    logger.info(f"embedding {len(chunks)} from {path}")
 
-    m_chunks = [f"search_document: {chunk}" for chunk in chunks]
-    vector_embeding = embeddings.embed_documents(m_chunks)
+    qclient, vector_store, embeddings = create_qdrant_session()
+    try:
+        vector_store.add_texts([chunk.page_content for chunk in chunks], [])
+        logger.info(f"embedded {len(chunks)}")
 
-    payload = {
-        "url": getxattr(path, "user.url").decode('utf-8'),
-        "date_created": getxattr(path, "user.doc").decode('utf-8'),
-        "date_modified": getxattr(path, "user.dom").decode("utf-8")
-    }
+    except Exception as error:
+        logger.error(f"failed to embed: {str(error)}")
 
-    vector_store.add_documents(m_chunks)
+@task(name="query", log_prints=True)
+def query(que: str):
+    logger = get_run_logger()
+    qclient, vector_store, embeddings = create_qdrant_session()
+
+    vectors = embeddings.embed_query(que)
+    results = vector_store.similarity_search_by_vector(vectors)
+
+    for doc in results:
+        print(doc)
+        logger.info(doc.page_content)
+        
+
+@flow(name="embedder", log_prints=True)
+def embedder(content: str):
+    chunks = text_chunking(content)
+    is_ammended = check_ammendment(chunks)
+    embed_chunks(chunks)
+
+if __name__ == "__main__":
+    embedder.serve(
+        name="embedder"
+    )
+
