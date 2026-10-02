@@ -5,6 +5,7 @@ from curl_cffi.requests import get
 from prefect import flow, task
 from prefect.logging import get_run_logger
 
+from pymupdf import open as open_pdf
 from pymupdf4llm import to_markdown
 
 from os.path import basename, join
@@ -37,7 +38,15 @@ def download_document(url: str) -> str:
                     doc.write(chunk)
 
         logger.info(f"downloaded at: {path}")
-        setxattr(path, "url", url)
+
+        pdf = open_pdf(path)
+        metadata = pdf.metadata
+
+        setxattr(path, "user.url", url.encode('utf-8'))
+        setxattr(path, "user.doc", metadata['creationDate'].encode('uft-8'))
+        setxattr(path, "user.dom", metadata['modDate'].encode('utf-8'))
+
+        pdf.close()
 
         return path
 
