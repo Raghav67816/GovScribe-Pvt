@@ -6,7 +6,7 @@ Arpeggio==2.0.3
 attrs==26.1.0
 beautifulsoup4==4.15.0
 caliper-reader==0.4.1
-certifi==2026.7.22
+certifi==2026.10.18
 cffi==2.1.1
 contourpy==1.4.0
 curl_cffi==0.16.3
